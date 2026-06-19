@@ -252,11 +252,19 @@ def update_material_status(mid, status):
 def add_repair_order(customer_id, customer_name, item_desc="", repair_content=""):
     conn = get_conn()
     cur = conn.cursor()
-    order_no = "R" + datetime.now().strftime("%Y%m%d%H%M%S")
-    cur.execute(
-        "INSERT INTO repair_orders (order_no, customer_id, customer_name, item_desc, repair_content) VALUES (?, ?, ?, ?, ?)",
-        (order_no, customer_id, customer_name, item_desc, repair_content))
-    conn.commit()
+    while True:
+        base = datetime.now().strftime("%Y%m%d%H%M%S")
+        cur.execute("SELECT COUNT(*) FROM repair_orders WHERE order_no LIKE ?", (f"R{base}%",))
+        suffix = cur.fetchone()[0]
+        order_no = f"R{base}{suffix:02d}" if suffix else f"R{base}"
+        try:
+            cur.execute(
+                "INSERT INTO repair_orders (order_no, customer_id, customer_name, item_desc, repair_content) VALUES (?, ?, ?, ?, ?)",
+                (order_no, customer_id, customer_name, item_desc, repair_content))
+            conn.commit()
+            break
+        except sqlite3.IntegrityError:
+            continue
     rid = cur.lastrowid
     conn.close()
     return rid, order_no
@@ -312,6 +320,15 @@ def get_flow_by_order(order_no):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM material_flow WHERE order_no = ? ORDER BY id DESC", (order_no,))
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_flow_by_repair_order_id(repair_order_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM material_flow WHERE repair_order_id = ? ORDER BY id ASC", (repair_order_id,))
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]

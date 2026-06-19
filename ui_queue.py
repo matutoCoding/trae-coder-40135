@@ -142,8 +142,14 @@ class QueueModule(QWidget):
         self.refresh()
 
     def mark_as_serving(self):
-        qid, _ = self._selected_row_id()
+        qid, row_idx = self._selected_row_id()
         if qid is None:
+            return
+        status_item = self.table.item(row_idx, 3)
+        raw = status_item.text() if status_item else ""
+        if not raw.startswith("叫号中"):
+            QMessageBox.warning(self, "提示",
+                                "只有「叫号中」的号码才能开始服务。\n请先点击「叫下一位」叫号。")
             return
         db.mark_serving(qid)
         self.refresh()
@@ -156,9 +162,41 @@ class QueueModule(QWidget):
         self.refresh()
 
     def mark_as_skipped(self):
-        qid, _ = self._selected_row_id()
+        qid, row_idx = self._selected_row_id()
         if qid is None:
             return
+        status_item = self.table.item(row_idx, 3)
+        current_status_raw = status_item.text() if status_item else ""
+        status_map = {
+            "等候中": "waiting",
+            "叫号中": "calling",
+            "服务中": "serving",
+            "已过号": "skipped",
+            "已完成": "done",
+            "已作废": "invalid",
+        }
+        status = ""
+        for k, v in status_map.items():
+            if current_status_raw.startswith(k):
+                status = v
+                break
+
+        if status != "calling":
+            tip = {
+                "waiting": "此号码还在等候中,尚未被叫到号,不能过号。",
+                "serving": "此客户正在服务中,不能过号。",
+                "done": "此号码已完成服务,不能过号。",
+                "invalid": "此号码已作废,不能再过号。",
+                "skipped": "此号码已过号,请等再次叫到后再处理。",
+            }.get(status, "当前状态不允许执行过号操作。")
+            QMessageBox.warning(self, "无法过号", tip + "\n\n只有「叫号中」的号码才能执行过号操作。")
+            return
+
+        ret = QMessageBox.question(self, "确认过号",
+                                   "确认该客户未到店,执行过号?\n(将累计过号次数,达到上限后自动作废)")
+        if ret != QMessageBox.Yes:
+            return
+
         result = db.mark_skipped(qid, MAX_SKIP_COUNT)
         if result == "invalid":
             QMessageBox.warning(self, "已作废", "连续过号达到上限,该号已自动作废")

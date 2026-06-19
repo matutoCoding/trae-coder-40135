@@ -41,7 +41,10 @@ class SkipModule(QWidget):
         filter_bar = QHBoxLayout()
         filter_bar.addWidget(QLabel("筛选:"))
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["全部记录", "仅过号/作废", "今日记录"])
+        self.filter_combo.addItems(
+            ["全部记录", "有过号记录(含重排/作废)", "今日记录"]
+        )
+        self.filter_combo.setCurrentIndex(1)
         self.filter_combo.currentIndexChanged.connect(self.refresh)
         filter_bar.addWidget(self.filter_combo)
         filter_bar.addStretch()
@@ -116,23 +119,50 @@ class SkipModule(QWidget):
         all_rows = db.get_queue_history(limit=500)
         mode = self.filter_combo.currentIndex()
         rows = []
+        from datetime import date
+        today_str = date.today().isoformat()
+
         for r in all_rows:
-            if mode == 1 and r["status"] not in ("skipped", "invalid"):
+            sc = r["skip_count"] or 0
+            if mode == 1 and sc == 0 and r["status"] != "invalid":
                 continue
+            if mode == 2:
+                created_today = r["created_at"] and r["created_at"].startswith(today_str)
+                called_today = r["called_at"] and r["called_at"].startswith(today_str)
+                if not created_today and not called_today:
+                    continue
             rows.append(r)
 
         self.table.setRowCount(len(rows))
-        skip_cnt = invalid_cnt = today_cnt = 0
-        from datetime import date
-        today_str = date.today().isoformat()
+        total_skip_times = 0
+        invalid_cnt = 0
+        today_process = 0
+
         for i, r in enumerate(rows):
+            sc = r["skip_count"] or 0
+            status = r["status"]
+            created_today = r["created_at"] and r["created_at"].startswith(today_str)
+            called_today = r["called_at"] and r["called_at"].startswith(today_str)
+            happened_today = called_today or (status == "invalid" and created_today) or (sc > 0 and called_today)
+
+            total_skip_times += sc
+            if status == "invalid":
+                invalid_cnt += 1
+            if happened_today and (sc > 0 or status == "invalid"):
+                today_process += 1
+
             id_item = QTableWidgetItem(r["ticket_no"])
             id_item.setData(Qt.UserRole, r["id"])
             self.table.setItem(i, 0, id_item)
             self.table.setItem(i, 1, QTableWidgetItem(r["customer_name"] or ""))
             self.table.setItem(i, 2, QTableWidgetItem(r["item_desc"] or ""))
 
-            status_text, color = self._status_style(r["status"])
+            is_invalid = status == "invalid"
+            status_text, color = self._status_style(status)
+            if sc > 0 and not is_invalid:
+                status_text += f" (已过{sc}次)"
+            if is_invalid:
+                status_text += f" (过{sc}次,作废)"
             status_item = QTableWidgetItem(status_text)
             status_item.setForeground(QColor(color))
             f = status_item.font()
@@ -140,9 +170,9 @@ class SkipModule(QWidget):
             status_item.setFont(f)
             self.table.setItem(i, 3, status_item)
 
-            sc = r["skip_count"] or 0
-            count_item = QTableWidgetItem(str(sc))
-            if sc >= MAX_SKIP_COUNT:
+            count_text = f"{sc} / {MAX_SKIP_COUNT}"
+            count_item = QTableWidgetItem(count_text)
+            if sc >= MAX_SKIP_COUNT or is_invalid:
                 count_item.setForeground(QColor("#b71c1c"))
                 count_item.setFont(f)
             elif sc > 0:
@@ -152,16 +182,9 @@ class SkipModule(QWidget):
             self.table.setItem(i, 6, QTableWidgetItem(r["created_at"] or ""))
             self.table.setItem(i, 7, QTableWidgetItem(str(r["id"])))
 
-            if sc > 0 and r["status"] != "invalid":
-                skip_cnt += 1
-            if r["status"] == "invalid":
-                invalid_cnt += 1
-            if r["created_at"] and r["created_at"].startswith(today_str):
-                today_cnt += 1
-
-        self.stat_skip.setText(f"累计过号: {skip_cnt}")
-        self.stat_invalid.setText(f"已作废: {invalid_cnt}")
-        self.stat_today.setText(f"今日处理: {today_cnt}")
+        self.stat_skip.setText(f"累计过号次数: {total_skip_times}")
+        self.stat_invalid.setText(f"已作废单号数: {invalid_cnt}")
+        self.stat_today.setText(f"今日过号/作废处理: {today_process}")
 
     def _status_style(self, s):
         return {

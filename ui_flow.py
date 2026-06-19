@@ -250,8 +250,16 @@ class FlowRecallModule(QWidget):
         QMessageBox.information(self, "成功", f"已创建工单: {ono}")
 
     def refresh_orders(self):
+        prev_id = None
+        row = self.order_table.currentRow()
+        if row >= 0:
+            it = self.order_table.item(row, 0)
+            if it:
+                prev_id = int(it.text())
+
         rows = db.get_repair_orders()
         self.order_table.setRowCount(len(rows))
+        target_row = -1
         for i, r in enumerate(rows):
             self.order_table.setItem(i, 0, QTableWidgetItem(str(r["id"])))
             self.order_table.setItem(i, 1, QTableWidgetItem(r["order_no"]))
@@ -259,6 +267,13 @@ class FlowRecallModule(QWidget):
             self.order_table.setItem(i, 3, QTableWidgetItem(r.get("item_desc") or ""))
             self.order_table.setItem(i, 4, QTableWidgetItem(r.get("repair_content") or ""))
             self.order_table.setItem(i, 5, QTableWidgetItem(r.get("created_at") or ""))
+            if prev_id is not None and r["id"] == prev_id:
+                target_row = i
+
+        if target_row >= 0:
+            self.order_table.selectRow(target_row)
+        elif self.order_table.rowCount() > 0 and row < 0:
+            self.order_table.selectRow(0)
 
     def refresh_materials(self):
         mats = db.get_materials()
@@ -339,14 +354,28 @@ class FlowRecallModule(QWidget):
 
     def _load_used_materials(self, order_id):
         self.used_list.clear()
-        flows = db.get_flow_by_order(None)
+        flows = db.get_flow_by_repair_order_id(order_id)
         mats = {m["id"]: m for m in db.get_materials()}
+        if not flows:
+            tip = QListWidgetItem("(此工单尚未登记使用的材料)", self.used_list)
+            tip.setForeground(QColor("#90a4ae"))
+            return
         for f in flows:
-            if f["repair_order_id"] != order_id:
-                continue
             m = mats.get(f["material_id"], {})
-            text = f"[{f['batch_no']}] {m.get('material_name','')}  用量: {f.get('usage_amount',0)}  时间: {f.get('used_at','')}"
-            QListWidgetItem(text, self.used_list)
+            mat_name = m.get("material_name", "")
+            mat_type = m.get("material_type") or ""
+            name_str = f"{mat_name}"
+            if mat_type:
+                name_str += f" [{mat_type}]"
+            amt = f.get("usage_amount", 0)
+            used_at = f.get("used_at") or ""
+            text = (
+                f"📦 批号: {f['batch_no']}\n"
+                f"   名称: {name_str}\n"
+                f"   用量: {amt} ml/g        时间: {used_at}"
+            )
+            item = QListWidgetItem(text, self.used_list)
+            item.setForeground(QColor("#263238"))
 
     def refresh_flows(self):
         mode = self.flow_filter.currentIndex()
