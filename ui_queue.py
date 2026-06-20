@@ -1,10 +1,10 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
-                               QMessageBox, QInputDialog, QFrame)
+                               QMessageBox, QFrame, QComboBox)
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QColor
 import db
-from config import MAX_SKIP_COUNT
+from config import MAX_SKIP_COUNT, PRIORITY_REASONS, PRIORITY_LABELS, PRIORITY_HIGH, PRIORITY_NORMAL
 
 
 class QueueModule(QWidget):
@@ -28,17 +28,25 @@ class QueueModule(QWidget):
         form = QFrame()
         form.setStyleSheet(FRAME_STYLE)
         fl = QHBoxLayout(form)
-        fl.setSpacing(10)
+        fl.setSpacing(8)
 
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("客户姓名")
         self.name_edit.setFixedHeight(36)
+
         self.phone_edit = QLineEdit()
         self.phone_edit.setPlaceholderText("联系电话")
         self.phone_edit.setFixedHeight(36)
+
         self.item_edit = QLineEdit()
         self.item_edit.setPlaceholderText("皮具类型 / 描述")
         self.item_edit.setFixedHeight(36)
+
+        self.priority_combo = QComboBox()
+        self.priority_combo.addItem("普通排队", PRIORITY_NORMAL)
+        for reason in PRIORITY_REASONS:
+            self.priority_combo.addItem(f"优先({reason})", PRIORITY_HIGH)
+        self.priority_combo.setFixedHeight(36)
 
         self.take_btn = QPushButton("取号排队")
         self.take_btn.setFixedHeight(36)
@@ -51,6 +59,8 @@ class QueueModule(QWidget):
         fl.addWidget(self.phone_edit, 1)
         fl.addWidget(QLabel("物品:"))
         fl.addWidget(self.item_edit, 2)
+        fl.addWidget(QLabel("类型:"))
+        fl.addWidget(self.priority_combo)
         fl.addWidget(self.take_btn)
         root.addWidget(form)
 
@@ -133,9 +143,14 @@ class QueueModule(QWidget):
         root.addWidget(dashboard)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["排队号", "客户姓名", "物品描述", "状态", "过号次数", "叫号时间", "取号时间"])
+        self.table.setColumnCount(9)
+        self.table.setHorizontalHeaderLabels(
+            ["排队号", "客户姓名", "电话", "物品描述", "优先级", "状态",
+             "过号次数", "叫号时间", "取号时间"]
+        )
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -149,12 +164,32 @@ class QueueModule(QWidget):
             return
         phone = self.phone_edit.text().strip()
         item = self.item_edit.text().strip()
-        cid = db.add_customer(name, phone, item_desc=item)
-        qid, ticket = db.add_queue(cid, name, item)
+        priority_level = self.priority_combo.currentData() or PRIORITY_NORMAL
+        priority_reason = ""
+        if priority_level >= PRIORITY_HIGH:
+            text = self.priority_combo.currentText()
+            for reason in PRIORITY_REASONS:
+                if reason in text:
+                    priority_reason = reason
+                    break
+        cid = None
+        exist = db.find_customer_by_name(name)
+        if exist:
+            cid = exist["id"]
+            if not phone and exist.get("phone"):
+                phone = exist["phone"]
+        else:
+            if phone or item:
+                cid = db.add_customer(name, phone=phone, item_desc=item)
+        qid, ticket = db.add_queue(cid, name, item, phone, priority_level, priority_reason)
         self.name_edit.clear()
         self.phone_edit.clear()
         self.item_edit.clear()
-        QMessageBox.information(self, "取号成功", f"排队号: {ticket}\n请在休息区等候叫号")
+        self.priority_combo.setCurrentIndex(0)
+        extra = ""
+        if priority_reason:
+            extra = f"\n优先原因: {priority_reason}\n(已插入到队列靠前位置)"
+        QMessageBox.information(self, "取号成功", f"排队号: {ticket}\n请在休息区等候叫号{extra}")
         self.refresh()
 
     def _selected_row_id(self):
@@ -172,14 +207,19 @@ class QueueModule(QWidget):
         if not row_data:
             QMessageBox.information(self, "提示", "当前没有等候中的客户")
         else:
-            self.current_label.setText(f"当前叫号: {row_data['ticket_no']}  {row_data['customer_name']}")
+            extra = ""
+            if (row_data.get("priority_level") or 0) >= PRIORITY_HIGH:
+                extra = f"  [{row_data.get('priority_reason') or '优先'}]"
+            self.current_label.setText(
+                f"当前叫号: {row_data['ticket_no']}  {row_data['customer_name']}{extra}"
+            )
         self.refresh()
 
     def mark_as_serving(self):
         qid, row_idx = self._selected_row_id()
         if qid is None:
             return
-        status_item = self.table.item(row_idx, 3)
+        status_item = self.table.item(row_idx, 5)
         raw = status_item.text() if status_item else ""
         if not raw.startswith("叫号中"):
             QMessageBox.warning(self, "提示",
@@ -199,7 +239,7 @@ class QueueModule(QWidget):
         qid, row_idx = self._selected_row_id()
         if qid is None:
             return
-        status_item = self.table.item(row_idx, 3)
+        status_item = self.table.item(row_idx, 5)
         current_status_raw = status_item.text() if status_item else ""
         status_map = {
             "等候中": "waiting",
@@ -248,7 +288,26 @@ class QueueModule(QWidget):
             id_item.setData(Qt.UserRole, r["id"])
             self.table.setItem(i, 0, id_item)
             self.table.setItem(i, 1, QTableWidgetItem(r["customer_name"] or ""))
-            self.table.setItem(i, 2, QTableWidgetItem(r["item_desc"] or ""))
+            self.table.setItem(i, 2, QTableWidgetItem(r.get("customer_phone") or ""))
+            self.table.setItem(i, 3, QTableWidgetItem(r["item_desc"] or ""))
+
+            pl = r.get("priority_level") or 0
+            pr = r.get("priority_reason") or ""
+            orig = r.get("original_order")
+            if pl >= PRIORITY_HIGH:
+                ptext = f"★ 优先({pr or '插队'})"
+                if orig and orig > (r.get("queue_order") or 0):
+                    ptext += f"  原#{orig}"
+                p_color = "#c62828"
+            else:
+                ptext = PRIORITY_LABELS.get(pl, "普通")
+                p_color = "#37474f"
+            p_item = QTableWidgetItem(ptext)
+            p_item.setForeground(QColor(p_color))
+            pf = p_item.font()
+            pf.setBold(True)
+            p_item.setFont(pf)
+            self.table.setItem(i, 4, p_item)
 
             status_text, color = self._status_style(r["status"])
             status_item = QTableWidgetItem(status_text)
@@ -256,20 +315,26 @@ class QueueModule(QWidget):
             f = status_item.font()
             f.setBold(True)
             status_item.setFont(f)
-            self.table.setItem(i, 3, status_item)
+            self.table.setItem(i, 5, status_item)
 
-            self.table.setItem(i, 4, QTableWidgetItem(str(r["skip_count"] or 0)))
-            self.table.setItem(i, 5, QTableWidgetItem(r["called_at"] or ""))
-            self.table.setItem(i, 6, QTableWidgetItem(r["created_at"] or ""))
+            self.table.setItem(i, 6, QTableWidgetItem(str(r["skip_count"] or 0)))
+            self.table.setItem(i, 7, QTableWidgetItem(r["called_at"] or ""))
+            self.table.setItem(i, 8, QTableWidgetItem(r["created_at"] or ""))
 
             if r["status"] == "calling":
-                current_ticket = f"{r['ticket_no']}  {r['customer_name']}"
+                extra = ""
+                if pl >= PRIORITY_HIGH and pr:
+                    extra = f"  [{pr}]"
+                current_ticket = f"{r['ticket_no']}  {r['customer_name']}{extra}"
 
         if current_ticket:
             self.current_label.setText(f"当前叫号: {current_ticket}")
         elif stats["current_calling"]:
             cc = stats["current_calling"]
-            self.current_label.setText(f"当前叫号: {cc['ticket_no']}  {cc['customer_name']}")
+            extra = ""
+            if (cc.get("priority_level") or 0) >= PRIORITY_HIGH and cc.get("priority_reason"):
+                extra = f"  [{cc['priority_reason']}]"
+            self.current_label.setText(f"当前叫号: {cc['ticket_no']}  {cc['customer_name']}{extra}")
         else:
             self.current_label.setText("当前叫号: —")
 
@@ -302,7 +367,7 @@ class QueueModule(QWidget):
 FRAME_STYLE = """
 QFrame { background:#f5f7fa; border:1px solid #dde3ea; border-radius:8px; padding:8px; }
 QLabel { color:#37474f; }
-QLineEdit { background:white; border:1px solid #cfd8dc; border-radius:6px; padding:4px 8px; }
+QLineEdit, QComboBox { background:white; border:1px solid #cfd8dc; border-radius:6px; padding:4px 8px; }
 """
 BTN_PRIMARY = """
 QPushButton { background:#1976d2; color:white; border:none; border-radius:6px; padding:6px 16px; }

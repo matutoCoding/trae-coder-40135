@@ -2,7 +2,8 @@ import sqlite3
 from datetime import datetime, date
 from config import DB_PATH, ensure_dirs, QUEUE_STATUS_WAITING, QUEUE_STATUS_CALLING, \
     QUEUE_STATUS_SERVING, QUEUE_STATUS_SKIPPED, QUEUE_STATUS_DONE, QUEUE_STATUS_INVALID, \
-    MATERIAL_STATUS_ACTIVE, MATERIAL_STATUS_EXPIRED
+    MATERIAL_STATUS_ACTIVE, MATERIAL_STATUS_EXPIRED, RECALL_STATUS_PENDING, \
+    PRIORITY_NORMAL, PRIORITY_HIGH
 
 
 def get_conn():
@@ -32,10 +33,14 @@ def init_db():
         ticket_no TEXT NOT NULL,
         customer_id INTEGER,
         customer_name TEXT NOT NULL,
+        customer_phone TEXT,
         item_desc TEXT,
         status TEXT NOT NULL DEFAULT 'waiting',
         skip_count INTEGER NOT NULL DEFAULT 0,
         queue_order INTEGER NOT NULL DEFAULT 0,
+        priority_level INTEGER NOT NULL DEFAULT 0,
+        priority_reason TEXT,
+        original_order INTEGER,
         called_at TEXT,
         last_skipped_at TEXT,
         created_at TEXT DEFAULT (datetime('now','localtime'))
@@ -77,6 +82,8 @@ def init_db():
         customer_name TEXT,
         customer_phone TEXT,
         usage_amount REAL DEFAULT 0,
+        recall_status TEXT DEFAULT 'pending',
+        recall_remark TEXT,
         used_at TEXT DEFAULT (datetime('now','localtime')),
         FOREIGN KEY (material_id) REFERENCES materials(id) ON DELETE CASCADE,
         FOREIGN KEY (repair_order_id) REFERENCES repair_orders(id) ON DELETE CASCADE
@@ -95,10 +102,22 @@ def _migrate_schema(cur):
 
     if not has_col("queue", "last_skipped_at"):
         cur.execute("ALTER TABLE queue ADD COLUMN last_skipped_at TEXT")
+    if not has_col("queue", "customer_phone"):
+        cur.execute("ALTER TABLE queue ADD COLUMN customer_phone TEXT")
+    if not has_col("queue", "priority_level"):
+        cur.execute("ALTER TABLE queue ADD COLUMN priority_level INTEGER NOT NULL DEFAULT 0")
+    if not has_col("queue", "priority_reason"):
+        cur.execute("ALTER TABLE queue ADD COLUMN priority_reason TEXT")
+    if not has_col("queue", "original_order"):
+        cur.execute("ALTER TABLE queue ADD COLUMN original_order INTEGER")
     if not has_col("repair_orders", "customer_phone"):
         cur.execute("ALTER TABLE repair_orders ADD COLUMN customer_phone TEXT")
     if not has_col("material_flow", "customer_phone"):
         cur.execute("ALTER TABLE material_flow ADD COLUMN customer_phone TEXT")
+    if not has_col("material_flow", "recall_status"):
+        cur.execute("ALTER TABLE material_flow ADD COLUMN recall_status TEXT DEFAULT 'pending'")
+    if not has_col("material_flow", "recall_remark"):
+        cur.execute("ALTER TABLE material_flow ADD COLUMN recall_remark TEXT")
 
 
 def add_customer(name, phone="", item_type="", item_desc=""):
@@ -114,13 +133,30 @@ def add_customer(name, phone="", item_type="", item_desc=""):
     return cid
 
 
-def get_customers():
+def get_customers(keyword=""):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM customers ORDER BY id DESC")
+    if keyword:
+        cur.execute(
+            "SELECT * FROM customers WHERE name LIKE ? OR phone LIKE ? ORDER BY id DESC",
+            (f"%{keyword}%", f"%{keyword}%")
+        )
+    else:
+        cur.execute("SELECT * FROM customers ORDER BY id DESC")
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_customer_by_id(cid):
+    if not cid:
+        return None
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM customers WHERE id = ?", (cid,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def find_customer_by_name(name):
@@ -132,6 +168,14 @@ def find_customer_by_name(name):
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def update_customer_phone(cid, phone):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE customers SET phone = ? WHERE id = ?", (phone, cid))
+    conn.commit()
+    conn.close()
 
 
 def generate_ticket_no():
@@ -146,17 +190,52 @@ def generate_ticket_no():
     return f"A{today}{count:03d}"
 
 
-def add_queue(customer_id, customer_name, item_desc=""):
+def add_queue(customer_id, customer_name, item_desc="", customer_phone="",
+              priority_level=PRIORITY_NORMAL, priority_reason=""):
     conn = get_conn()
     cur = conn.cursor()
     ticket_no = generate_ticket_no()
+    if priority_level and priority_level >= PRIORITY_HIGH:
+        cur.execute(
+            "SELECT COALESCE(MAX(queue_order), 0) FROM queue WHERE status IN ('waiting','calling')"
+        )
+        max_order = cur.fetchone()[0] or 0
+        order = max_order + 1
+        original_order = max_order + 1
+        cur.execute(
+            "SELECT COALESCE(MIN(queue_order), 0) FROM queue WHERE status = 'waiting' AND priority_level >= ?",
+            (PRIORITY_HIGH,)
+        )
+        min_priority = cur.fetchone()[0] or 0
+        cur.execute(
+            "SELECT COALESCE(MIN(queue_order), 0) FROM queue WHERE status = 'waiting'"
+        )
+        min_all = cur.fetchone()[0] or 0
+        if min_priority > 0:
+            insert_at = min_priority - 1
+        else:
+            insert_at = min_all
+        if insert_at < 1:
+            insert_at = 1
+        cur.execute(
+            "UPDATE queue SET queue_order = queue_order + 1 WHERE status IN ('waiting','calling') AND queue_order >= ?",
+            (insert_at,)
+        )
+        order = insert_at
+    else:
+        cur.execute(
+            "SELECT COALESCE(MAX(queue_order), 0) + 1 FROM queue WHERE status IN ('waiting','calling')"
+        )
+        order = cur.fetchone()[0]
+        original_order = order
     cur.execute(
-        "SELECT COALESCE(MAX(queue_order), 0) + 1 FROM queue WHERE status IN ('waiting','calling')"
-    )
-    order = cur.fetchone()[0]
-    cur.execute(
-        "INSERT INTO queue (ticket_no, customer_id, customer_name, item_desc, status, queue_order) VALUES (?, ?, ?, ?, ?, ?)",
-        (ticket_no, customer_id, customer_name, item_desc, QUEUE_STATUS_WAITING, order)
+        """
+        INSERT INTO queue (ticket_no, customer_id, customer_name, customer_phone, item_desc,
+                           status, queue_order, priority_level, priority_reason, original_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (ticket_no, customer_id, customer_name, customer_phone, item_desc,
+         QUEUE_STATUS_WAITING, order, priority_level, priority_reason, original_order)
     )
     conn.commit()
     qid = cur.lastrowid
@@ -174,10 +253,30 @@ def get_active_queue():
     return [dict(r) for r in rows]
 
 
-def get_queue_history(limit=100):
+def get_queue_history(limit=200, keyword=""):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM queue ORDER BY id DESC LIMIT ?", (limit,))
+    if keyword:
+        cur.execute(
+            "SELECT * FROM queue WHERE customer_name LIKE ? OR ticket_no LIKE ? OR customer_phone LIKE ? ORDER BY id DESC LIMIT ?",
+            (f"%{keyword}%", f"%{keyword}%", f"%{keyword}%", limit)
+        )
+    else:
+        cur.execute("SELECT * FROM queue ORDER BY id DESC LIMIT ?", (limit,))
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_queue_by_customer(customer_id=None, customer_name=""):
+    conn = get_conn()
+    cur = conn.cursor()
+    if customer_id:
+        cur.execute("SELECT * FROM queue WHERE customer_id = ? ORDER BY id DESC", (customer_id,))
+    elif customer_name:
+        cur.execute("SELECT * FROM queue WHERE customer_name = ? ORDER BY id DESC", (customer_name,))
+    else:
+        return []
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -241,7 +340,7 @@ def call_next():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM queue WHERE status = ? ORDER BY queue_order ASC, id ASC LIMIT 1",
+        "SELECT * FROM queue WHERE status = ? ORDER BY priority_level DESC, queue_order ASC, id ASC LIMIT 1",
         (QUEUE_STATUS_WAITING,))
     row = cur.fetchone()
     if not row:
@@ -393,10 +492,30 @@ def add_repair_order(customer_id, customer_name, customer_phone="", item_desc=""
     return rid, order_no
 
 
-def get_repair_orders():
+def get_repair_orders(keyword=""):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM repair_orders ORDER BY id DESC")
+    if keyword:
+        cur.execute(
+            "SELECT * FROM repair_orders WHERE customer_name LIKE ? OR order_no LIKE ? OR customer_phone LIKE ? ORDER BY id DESC",
+            (f"%{keyword}%", f"%{keyword}%", f"%{keyword}%")
+        )
+    else:
+        cur.execute("SELECT * FROM repair_orders ORDER BY id DESC")
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_repair_orders_by_customer(customer_id=None, customer_name=""):
+    conn = get_conn()
+    cur = conn.cursor()
+    if customer_id:
+        cur.execute("SELECT * FROM repair_orders WHERE customer_id = ? ORDER BY id DESC", (customer_id,))
+    elif customer_name:
+        cur.execute("SELECT * FROM repair_orders WHERE customer_name = ? ORDER BY id DESC", (customer_name,))
+    else:
+        return []
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -422,12 +541,42 @@ def update_repair_photos(rid, before_photo=None, after_photo=None):
     conn.close()
 
 
+def update_flow_phone(flow_id, phone):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM material_flow WHERE id = ?", (flow_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return False
+    row = dict(row)
+    cur.execute("UPDATE material_flow SET customer_phone = ? WHERE id = ?", (phone, flow_id))
+    if row.get("repair_order_id"):
+        cur.execute("UPDATE repair_orders SET customer_phone = ? WHERE id = ? AND (customer_phone IS NULL OR customer_phone = '')",
+                    (phone, row["repair_order_id"]))
+    if row.get("customer_id"):
+        cur.execute("UPDATE customers SET phone = ? WHERE id = ? AND (phone IS NULL OR phone = '')",
+                    (phone, row["customer_id"]))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def update_flow_recall_status(flow_id, recall_status, recall_remark=""):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE material_flow SET recall_status = ?, recall_remark = ? WHERE id = ?",
+                (recall_status, recall_remark, flow_id))
+    conn.commit()
+    conn.close()
+
+
 def add_material_flow(material_id, batch_no, repair_order_id, order_no, customer_id, customer_name, customer_phone, usage_amount=0):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO material_flow (material_id, batch_no, repair_order_id, order_no, customer_id, customer_name, customer_phone, usage_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (material_id, batch_no, repair_order_id, order_no, customer_id, customer_name, customer_phone, usage_amount))
+        "INSERT INTO material_flow (material_id, batch_no, repair_order_id, order_no, customer_id, customer_name, customer_phone, usage_amount, recall_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (material_id, batch_no, repair_order_id, order_no, customer_id, customer_name, customer_phone, usage_amount, RECALL_STATUS_PENDING))
     conn.commit()
     fid = cur.lastrowid
     conn.close()
@@ -466,6 +615,20 @@ def get_flow_by_repair_order_id(repair_order_id):
     return [dict(r) for r in rows]
 
 
+def get_flows_by_customer(customer_id=None, customer_name=""):
+    conn = get_conn()
+    cur = conn.cursor()
+    if customer_id:
+        cur.execute("SELECT * FROM material_flow WHERE customer_id = ? ORDER BY id DESC", (customer_id,))
+    elif customer_name:
+        cur.execute("SELECT * FROM material_flow WHERE customer_name = ? ORDER BY id DESC", (customer_name,))
+    else:
+        return []
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def check_expired_materials():
     today = date.today().isoformat()
     conn = get_conn()
@@ -491,6 +654,8 @@ def get_flows_combined(customer_name="", order_no="", batch_no="", material_name
                mf.customer_name,
                mf.usage_amount,
                mf.used_at,
+               mf.recall_status,
+               mf.recall_remark,
                m.material_name,
                m.material_type,
                m.expiry_date,
@@ -534,14 +699,11 @@ def get_today_skip_stats():
     cur.execute("SELECT COUNT(*) FROM queue WHERE status = ?", (QUEUE_STATUS_INVALID,))
     total_invalid = cur.fetchone()[0] or 0
 
-    today = date.today().isoformat()
     cur.execute(
         """
         SELECT COUNT(*) FROM queue
         WHERE DATE(last_skipped_at) = DATE('now','localtime')
-           OR (status = ? AND DATE(last_skipped_at) = DATE('now','localtime'))
         """,
-        (QUEUE_STATUS_INVALID,)
     )
     today_processed = cur.fetchone()[0] or 0
 
