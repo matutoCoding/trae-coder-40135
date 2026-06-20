@@ -37,6 +37,7 @@ def init_db():
         skip_count INTEGER NOT NULL DEFAULT 0,
         queue_order INTEGER NOT NULL DEFAULT 0,
         called_at TEXT,
+        last_skipped_at TEXT,
         created_at TEXT DEFAULT (datetime('now','localtime'))
     );
 
@@ -57,6 +58,7 @@ def init_db():
         order_no TEXT NOT NULL UNIQUE,
         customer_id INTEGER,
         customer_name TEXT NOT NULL,
+        customer_phone TEXT,
         item_desc TEXT,
         repair_content TEXT,
         before_photo TEXT,
@@ -73,6 +75,7 @@ def init_db():
         order_no TEXT NOT NULL,
         customer_id INTEGER,
         customer_name TEXT,
+        customer_phone TEXT,
         usage_amount REAL DEFAULT 0,
         used_at TEXT DEFAULT (datetime('now','localtime')),
         FOREIGN KEY (material_id) REFERENCES materials(id) ON DELETE CASCADE,
@@ -80,8 +83,22 @@ def init_db():
     );
     """)
 
+    _migrate_schema(cur)
     conn.commit()
     conn.close()
+
+
+def _migrate_schema(cur):
+    def has_col(table, col):
+        cur.execute(f"PRAGMA table_info({table})")
+        return any(r[1] == col for r in cur.fetchall())
+
+    if not has_col("queue", "last_skipped_at"):
+        cur.execute("ALTER TABLE queue ADD COLUMN last_skipped_at TEXT")
+    if not has_col("repair_orders", "customer_phone"):
+        cur.execute("ALTER TABLE repair_orders ADD COLUMN customer_phone TEXT")
+    if not has_col("material_flow", "customer_phone"):
+        cur.execute("ALTER TABLE material_flow ADD COLUMN customer_phone TEXT")
 
 
 def add_customer(name, phone="", item_type="", item_desc=""):
@@ -104,6 +121,17 @@ def get_customers():
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def find_customer_by_name(name):
+    if not name:
+        return None
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM customers WHERE name = ? ORDER BY id DESC LIMIT 1", (name,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def generate_ticket_no():
@@ -253,9 +281,10 @@ def mark_skipped(qid, max_skip):
         conn.close()
         return None
     new_count = row["skip_count"] + 1
+    now_sql = "datetime('now','localtime')"
     if new_count >= max_skip:
         cur.execute(
-            "UPDATE queue SET status = ?, skip_count = ? WHERE id = ?",
+            f"UPDATE queue SET status = ?, skip_count = ?, last_skipped_at = {now_sql} WHERE id = ?",
             (QUEUE_STATUS_INVALID, new_count, qid))
         conn.commit()
         conn.close()
@@ -264,7 +293,7 @@ def mark_skipped(qid, max_skip):
         "SELECT COALESCE(MAX(queue_order), 0) FROM queue WHERE status IN ('waiting','calling')")
     max_order = cur.fetchone()[0] or 0
     cur.execute(
-        "UPDATE queue SET status = ?, skip_count = ?, queue_order = ? WHERE id = ?",
+        f"UPDATE queue SET status = ?, skip_count = ?, queue_order = ?, last_skipped_at = {now_sql} WHERE id = ?",
         (QUEUE_STATUS_WAITING, new_count, max_order + 1, qid))
     conn.commit()
     conn.close()
@@ -334,16 +363,16 @@ def consume_material(mid, amount):
 
 
 def add_material_flow_with_consume(material_id, batch_no, repair_order_id, order_no,
-                                   customer_id, customer_name, usage_amount):
+                                   customer_id, customer_name, customer_phone, usage_amount):
     ok, msg = consume_material(material_id, usage_amount)
     if not ok:
         return None, msg
     fid = add_material_flow(material_id, batch_no, repair_order_id, order_no,
-                            customer_id, customer_name, usage_amount)
+                            customer_id, customer_name, customer_phone, usage_amount)
     return fid, "登记成功"
 
 
-def add_repair_order(customer_id, customer_name, item_desc="", repair_content=""):
+def add_repair_order(customer_id, customer_name, customer_phone="", item_desc="", repair_content=""):
     conn = get_conn()
     cur = conn.cursor()
     while True:
@@ -353,8 +382,8 @@ def add_repair_order(customer_id, customer_name, item_desc="", repair_content=""
         order_no = f"R{base}{suffix:02d}" if suffix else f"R{base}"
         try:
             cur.execute(
-                "INSERT INTO repair_orders (order_no, customer_id, customer_name, item_desc, repair_content) VALUES (?, ?, ?, ?, ?)",
-                (order_no, customer_id, customer_name, item_desc, repair_content))
+                "INSERT INTO repair_orders (order_no, customer_id, customer_name, customer_phone, item_desc, repair_content) VALUES (?, ?, ?, ?, ?, ?)",
+                (order_no, customer_id, customer_name, customer_phone, item_desc, repair_content))
             conn.commit()
             break
         except sqlite3.IntegrityError:
@@ -373,6 +402,15 @@ def get_repair_orders():
     return [dict(r) for r in rows]
 
 
+def get_repair_order_by_id(rid):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM repair_orders WHERE id = ?", (rid,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def update_repair_photos(rid, before_photo=None, after_photo=None):
     conn = get_conn()
     cur = conn.cursor()
@@ -384,12 +422,12 @@ def update_repair_photos(rid, before_photo=None, after_photo=None):
     conn.close()
 
 
-def add_material_flow(material_id, batch_no, repair_order_id, order_no, customer_id, customer_name, usage_amount=0):
+def add_material_flow(material_id, batch_no, repair_order_id, order_no, customer_id, customer_name, customer_phone, usage_amount=0):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO material_flow (material_id, batch_no, repair_order_id, order_no, customer_id, customer_name, usage_amount) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (material_id, batch_no, repair_order_id, order_no, customer_id, customer_name, usage_amount))
+        "INSERT INTO material_flow (material_id, batch_no, repair_order_id, order_no, customer_id, customer_name, customer_phone, usage_amount) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (material_id, batch_no, repair_order_id, order_no, customer_id, customer_name, customer_phone, usage_amount))
     conn.commit()
     fid = cur.lastrowid
     conn.close()
@@ -444,14 +482,22 @@ def get_flows_combined(customer_name="", order_no="", batch_no="", material_name
     conn = get_conn()
     cur = conn.cursor()
     sql = """
-        SELECT mf.*,
+        SELECT mf.id,
+               mf.material_id,
+               mf.batch_no,
+               mf.repair_order_id,
+               mf.order_no,
+               mf.customer_id,
+               mf.customer_name,
+               mf.usage_amount,
+               mf.used_at,
                m.material_name,
                m.material_type,
                m.expiry_date,
                m.status AS material_status,
                ro.item_desc,
                ro.repair_content,
-               c.phone AS customer_phone
+               COALESCE(NULLIF(mf.customer_phone,''), NULLIF(ro.customer_phone,''), NULLIF(c.phone,'')) AS customer_phone
         FROM material_flow mf
         LEFT JOIN materials m ON mf.material_id = m.id
         LEFT JOIN repair_orders ro ON mf.repair_order_id = ro.id
@@ -473,6 +519,46 @@ def get_flows_combined(customer_name="", order_no="", batch_no="", material_name
         params.append(f"%{material_name}%")
     sql += " ORDER BY mf.id DESC"
     cur.execute(sql, params)
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_today_skip_stats():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT COALESCE(SUM(skip_count), 0) FROM queue")
+    total_skip = cur.fetchone()[0] or 0
+
+    cur.execute("SELECT COUNT(*) FROM queue WHERE status = ?", (QUEUE_STATUS_INVALID,))
+    total_invalid = cur.fetchone()[0] or 0
+
+    today = date.today().isoformat()
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM queue
+        WHERE DATE(last_skipped_at) = DATE('now','localtime')
+           OR (status = ? AND DATE(last_skipped_at) = DATE('now','localtime'))
+        """,
+        (QUEUE_STATUS_INVALID,)
+    )
+    today_processed = cur.fetchone()[0] or 0
+
+    conn.close()
+    return {
+        "total_skip": total_skip,
+        "total_invalid": total_invalid,
+        "today_processed": today_processed,
+    }
+
+
+def get_skip_records():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM queue WHERE skip_count > 0 OR status = ? ORDER BY last_skipped_at DESC NULLS LAST, id DESC",
+        (QUEUE_STATUS_INVALID,))
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]

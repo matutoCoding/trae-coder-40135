@@ -122,22 +122,11 @@ class SkipModule(QWidget):
         from datetime import date
         today_str = date.today().isoformat()
 
-        # ---------- 统计：固定用全量数据，不受筛选影响 ----------
-        total_skip_times = 0
-        invalid_cnt = 0
-        today_process = 0
-        for r in all_rows:
-            sc = r["skip_count"] or 0
-            status = r["status"]
-            created_today = r["created_at"] and r["created_at"].startswith(today_str)
-            called_today = r["called_at"] and r["called_at"].startswith(today_str)
-            happened_today = called_today or (status == "invalid" and created_today)
-
-            total_skip_times += sc
-            if status == "invalid":
-                invalid_cnt += 1
-            if happened_today and (sc > 0 or status == "invalid"):
-                today_process += 1
+        # ---------- 统计：调用专用函数，按 last_skipped_at 真实操作时间计算 ----------
+        stat = db.get_today_skip_stats()
+        total_skip_times = stat["total_skip"]
+        invalid_cnt = stat["total_invalid"]
+        today_process = stat["today_processed"]
 
         # ---------- 筛选表格数据 ----------
         for r in all_rows:
@@ -145,9 +134,9 @@ class SkipModule(QWidget):
             if mode == 1 and sc == 0 and r["status"] != "invalid":
                 continue
             if mode == 2:
+                last_skipped_today = r.get("last_skipped_at") and r["last_skipped_at"].startswith(today_str)
                 created_today = r["created_at"] and r["created_at"].startswith(today_str)
-                called_today = r["called_at"] and r["called_at"].startswith(today_str)
-                if not created_today and not called_today:
+                if not last_skipped_today and not created_today:
                     continue
             rows.append(r)
 

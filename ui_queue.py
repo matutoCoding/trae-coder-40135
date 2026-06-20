@@ -271,8 +271,7 @@ class QueueModule(QWidget):
             cc = stats["current_calling"]
             self.current_label.setText(f"当前叫号: {cc['ticket_no']}  {cc['customer_name']}")
         else:
-            if "—" not in self.current_label.text():
-                pass
+            self.current_label.setText("当前叫号: —")
 
         self._stat_labels["waiting"].setText(str(stats["waiting"]))
         self._stat_labels["calling"].setText(str(stats["calling"]))

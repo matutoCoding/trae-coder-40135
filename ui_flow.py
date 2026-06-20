@@ -66,6 +66,8 @@ class FlowRecallModule(QWidget):
         fl.setSpacing(8)
         self.o_name = QLineEdit()
         self.o_name.setPlaceholderText("客户姓名")
+        self.o_phone = QLineEdit()
+        self.o_phone.setPlaceholderText("联系电话")
         self.o_item = QLineEdit()
         self.o_item.setPlaceholderText("皮具物品描述")
         self.o_content = QLineEdit()
@@ -73,8 +75,11 @@ class FlowRecallModule(QWidget):
         self.o_create_btn = QPushButton("➕ 新建工单")
         self.o_create_btn.setStyleSheet(BTN_PRIMARY)
         self.o_create_btn.clicked.connect(self.create_order)
+        self.o_name.editingFinished.connect(self._autofill_phone)
         fl.addWidget(QLabel("姓名:"))
         fl.addWidget(self.o_name, 1)
+        fl.addWidget(QLabel("电话:"))
+        fl.addWidget(self.o_phone, 1)
         fl.addWidget(QLabel("物品:"))
         fl.addWidget(self.o_item, 2)
         fl.addWidget(QLabel("修复:"))
@@ -90,8 +95,8 @@ class FlowRecallModule(QWidget):
         ll.setContentsMargins(0, 0, 0, 0)
         ll.addWidget(QLabel("📋 修复工单列表"))
         self.order_table = QTableWidget()
-        self.order_table.setColumnCount(6)
-        self.order_table.setHorizontalHeaderLabels(["ID", "工单号", "客户", "物品", "修复内容", "创建时间"])
+        self.order_table.setColumnCount(7)
+        self.order_table.setHorizontalHeaderLabels(["ID", "工单号", "客户", "电话", "物品", "修复内容", "创建时间"])
         self.order_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.order_table.verticalHeader().setVisible(False)
         self.order_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -276,15 +281,35 @@ class FlowRecallModule(QWidget):
         self.tabs.addTab(w, "⚠ 批次召回查询")
 
     # ---------- 业务逻辑 ----------
+    def _autofill_phone(self):
+        name = self.o_name.text().strip()
+        if not name:
+            return
+        exist = db.find_customer_by_name(name)
+        if exist and exist.get("phone"):
+            if not self.o_phone.text().strip():
+                self.o_phone.setText(exist["phone"])
+
     def create_order(self):
         name = self.o_name.text().strip()
         if not name:
             QMessageBox.warning(self, "提示", "请输入客户姓名")
             return
+        phone = self.o_phone.text().strip()
         item = self.o_item.text().strip()
         content = self.o_content.text().strip()
-        rid, ono = db.add_repair_order(None, name, item, content)
+        customer_id = None
+        exist = db.find_customer_by_name(name)
+        if exist:
+            customer_id = exist["id"]
+            if not phone and exist.get("phone"):
+                phone = exist["phone"]
+        else:
+            if phone or item:
+                customer_id = db.add_customer(name, phone=phone, item_desc=item)
+        rid, ono = db.add_repair_order(customer_id, name, phone, item, content)
         self.o_name.clear()
+        self.o_phone.clear()
         self.o_item.clear()
         self.o_content.clear()
         self.refresh_orders()
@@ -305,9 +330,10 @@ class FlowRecallModule(QWidget):
             self.order_table.setItem(i, 0, QTableWidgetItem(str(r["id"])))
             self.order_table.setItem(i, 1, QTableWidgetItem(r["order_no"]))
             self.order_table.setItem(i, 2, QTableWidgetItem(r["customer_name"] or ""))
-            self.order_table.setItem(i, 3, QTableWidgetItem(r.get("item_desc") or ""))
-            self.order_table.setItem(i, 4, QTableWidgetItem(r.get("repair_content") or ""))
-            self.order_table.setItem(i, 5, QTableWidgetItem(r.get("created_at") or ""))
+            self.order_table.setItem(i, 3, QTableWidgetItem(r.get("customer_phone") or ""))
+            self.order_table.setItem(i, 4, QTableWidgetItem(r.get("item_desc") or ""))
+            self.order_table.setItem(i, 5, QTableWidgetItem(r.get("repair_content") or ""))
+            self.order_table.setItem(i, 6, QTableWidgetItem(r.get("created_at") or ""))
             if prev_id is not None and r["id"] == prev_id:
                 target_row = i
 
@@ -380,6 +406,11 @@ class FlowRecallModule(QWidget):
             QMessageBox.information(self, "提示", "请先在「材料批次」中登记批次")
             return
         amount = self.mat_amt.value()
+        phone = order.get("customer_phone") or ""
+        if not phone:
+            exist = db.find_customer_by_name(order.get("customer_name", ""))
+            if exist and exist.get("phone"):
+                phone = exist["phone"]
         fid, msg = db.add_material_flow_with_consume(
             material_id=data["id"],
             batch_no=data["batch_no"],
@@ -387,6 +418,7 @@ class FlowRecallModule(QWidget):
             order_no=order["order_no"],
             customer_id=order.get("customer_id"),
             customer_name=order["customer_name"],
+            customer_phone=phone,
             usage_amount=amount,
         )
         if fid is None:
@@ -526,6 +558,18 @@ class FlowRecallModule(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "导出召回名单", default_name, "CSV文件 (*.csv)")
         if not path:
             return
+        missing = [r for r in self._last_recall_results if not r.get("customer_phone")]
+        if missing:
+            names = "、".join({r.get("customer_name") or "(未知)" for r in missing})
+            ret = QMessageBox.warning(
+                self, "注意",
+                f"有 {len(missing)} 条记录的联系电话缺失,包括客户: {names}。\n"
+                f"建议先补录这些客户的电话后再导出。\n是否仍然继续导出?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if ret != QMessageBox.Yes:
+                return
         try:
             import csv
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
@@ -539,7 +583,7 @@ class FlowRecallModule(QWidget):
                         r.get("id", ""),
                         r.get("order_no", ""),
                         r.get("customer_name", ""),
-                        r.get("customer_phone", ""),
+                        r.get("customer_phone", "") or "",
                         r.get("item_desc", ""),
                         r.get("repair_content", ""),
                         r.get("batch_no", ""),
