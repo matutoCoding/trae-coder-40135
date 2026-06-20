@@ -122,6 +122,24 @@ class SkipModule(QWidget):
         from datetime import date
         today_str = date.today().isoformat()
 
+        # ---------- 统计：固定用全量数据，不受筛选影响 ----------
+        total_skip_times = 0
+        invalid_cnt = 0
+        today_process = 0
+        for r in all_rows:
+            sc = r["skip_count"] or 0
+            status = r["status"]
+            created_today = r["created_at"] and r["created_at"].startswith(today_str)
+            called_today = r["called_at"] and r["called_at"].startswith(today_str)
+            happened_today = called_today or (status == "invalid" and created_today)
+
+            total_skip_times += sc
+            if status == "invalid":
+                invalid_cnt += 1
+            if happened_today and (sc > 0 or status == "invalid"):
+                today_process += 1
+
+        # ---------- 筛选表格数据 ----------
         for r in all_rows:
             sc = r["skip_count"] or 0
             if mode == 1 and sc == 0 and r["status"] != "invalid":
@@ -134,22 +152,10 @@ class SkipModule(QWidget):
             rows.append(r)
 
         self.table.setRowCount(len(rows))
-        total_skip_times = 0
-        invalid_cnt = 0
-        today_process = 0
 
         for i, r in enumerate(rows):
             sc = r["skip_count"] or 0
             status = r["status"]
-            created_today = r["created_at"] and r["created_at"].startswith(today_str)
-            called_today = r["called_at"] and r["called_at"].startswith(today_str)
-            happened_today = called_today or (status == "invalid" and created_today) or (sc > 0 and called_today)
-
-            total_skip_times += sc
-            if status == "invalid":
-                invalid_cnt += 1
-            if happened_today and (sc > 0 or status == "invalid"):
-                today_process += 1
 
             id_item = QTableWidgetItem(r["ticket_no"])
             id_item.setData(Qt.UserRole, r["id"])

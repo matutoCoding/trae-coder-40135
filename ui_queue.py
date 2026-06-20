@@ -98,6 +98,40 @@ class QueueModule(QWidget):
         )
         root.addWidget(self.current_label)
 
+        dashboard = QFrame()
+        dashboard.setStyleSheet(
+            "QFrame{background:#f5f7fa;border:1px solid #dde3ea;border-radius:8px;padding:10px;}"
+        )
+        dl = QHBoxLayout(dashboard)
+        dl.setSpacing(8)
+        self._stat_labels = {}
+        for key, label, color in [
+            ("waiting", "等候中", "#1976d2"),
+            ("calling", "叫号中", "#d84315"),
+            ("serving", "服务中", "#2e7d32"),
+            ("done", "已完成", "#455a64"),
+            ("invalid", "已作废", "#b71c1c"),
+            ("avg_wait", "平均等待", "#6a1b9a"),
+        ]:
+            box = QFrame()
+            box.setStyleSheet(
+                f"QFrame{{background:white;border:1px solid #e0e0e0;border-radius:6px;padding:6px;}}"
+            )
+            bl = QVBoxLayout(box)
+            bl.setSpacing(4)
+            bl.setContentsMargins(8, 6, 8, 6)
+            title = QLabel(label)
+            title.setAlignment(Qt.AlignCenter)
+            title.setStyleSheet(f"color:{color};font-size:12px;font-weight:bold;")
+            val = QLabel("0")
+            val.setAlignment(Qt.AlignCenter)
+            val.setStyleSheet(f"color:{color};font-size:20px;font-weight:bold;")
+            bl.addWidget(title)
+            bl.addWidget(val)
+            self._stat_labels[key] = val
+            dl.addWidget(box, 1)
+        root.addWidget(dashboard)
+
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["排队号", "客户姓名", "物品描述", "状态", "过号次数", "叫号时间", "取号时间"])
@@ -205,6 +239,7 @@ class QueueModule(QWidget):
         self.refresh()
 
     def refresh(self):
+        stats = db.get_today_queue_stats()
         rows = db.get_active_queue()
         self.table.setRowCount(len(rows))
         current_ticket = None
@@ -230,8 +265,29 @@ class QueueModule(QWidget):
             if r["status"] == "calling":
                 current_ticket = f"{r['ticket_no']}  {r['customer_name']}"
 
-        if current_ticket and "—" in self.current_label.text():
+        if current_ticket:
             self.current_label.setText(f"当前叫号: {current_ticket}")
+        elif stats["current_calling"]:
+            cc = stats["current_calling"]
+            self.current_label.setText(f"当前叫号: {cc['ticket_no']}  {cc['customer_name']}")
+        else:
+            if "—" not in self.current_label.text():
+                pass
+
+        self._stat_labels["waiting"].setText(str(stats["waiting"]))
+        self._stat_labels["calling"].setText(str(stats["calling"]))
+        self._stat_labels["serving"].setText(str(stats["serving"]))
+        self._stat_labels["done"].setText(str(stats["done"]))
+        self._stat_labels["invalid"].setText(str(stats["invalid"]))
+
+        sec = stats["avg_wait_sec"]
+        if sec > 60:
+            m, s = divmod(sec, 60)
+            self._stat_labels["avg_wait"].setText(f"{m}分{s}秒")
+        elif sec > 0:
+            self._stat_labels["avg_wait"].setText(f"{sec}秒")
+        else:
+            self._stat_labels["avg_wait"].setText("—")
 
     def _status_style(self, s):
         return {

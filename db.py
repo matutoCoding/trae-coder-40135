@@ -1,7 +1,8 @@
 import sqlite3
 from datetime import datetime, date
 from config import DB_PATH, ensure_dirs, QUEUE_STATUS_WAITING, QUEUE_STATUS_CALLING, \
-    QUEUE_STATUS_SKIPPED, QUEUE_STATUS_DONE, QUEUE_STATUS_INVALID, MATERIAL_STATUS_ACTIVE, MATERIAL_STATUS_EXPIRED
+    QUEUE_STATUS_SERVING, QUEUE_STATUS_SKIPPED, QUEUE_STATUS_DONE, QUEUE_STATUS_INVALID, \
+    MATERIAL_STATUS_ACTIVE, MATERIAL_STATUS_EXPIRED
 
 
 def get_conn():
@@ -154,6 +155,60 @@ def get_queue_history(limit=100):
     return [dict(r) for r in rows]
 
 
+def get_today_queue_stats():
+    from datetime import datetime, date
+    today = date.today().isoformat()
+    conn = get_conn()
+    cur = conn.cursor()
+
+    stats = {
+        "waiting": 0,
+        "calling": 0,
+        "serving": 0,
+        "done": 0,
+        "invalid": 0,
+        "total": 0,
+        "avg_wait_sec": 0,
+        "current_calling": None,
+    }
+
+    cur.execute(
+        "SELECT status, COUNT(*) FROM queue WHERE DATE(created_at) = DATE('now','localtime') GROUP BY status"
+    )
+    for status, cnt in cur.fetchall():
+        if status in stats:
+            stats[status] = cnt
+    stats["total"] = sum(stats[s] for s in ["waiting", "calling", "serving", "done", "invalid"])
+
+    cur.execute(
+        "SELECT * FROM queue WHERE status = 'calling' ORDER BY called_at DESC LIMIT 1"
+    )
+    row = cur.fetchone()
+    if row:
+        stats["current_calling"] = dict(row)
+
+    cur.execute(
+        "SELECT called_at, created_at FROM queue WHERE status IN ('done','serving','calling') "
+        "AND DATE(created_at) = DATE('now','localtime') AND called_at IS NOT NULL"
+    )
+    rows = cur.fetchall()
+    total_sec = 0
+    count = 0
+    for called, created in rows:
+        try:
+            c1 = datetime.strptime(called, "%Y-%m-%d %H:%M:%S")
+            c2 = datetime.strptime(created, "%Y-%m-%d %H:%M:%S")
+            total_sec += (c1 - c2).total_seconds()
+            count += 1
+        except Exception:
+            pass
+    if count > 0:
+        stats["avg_wait_sec"] = int(total_sec / count)
+
+    conn.close()
+    return stats
+
+
 def call_next():
     conn = get_conn()
     cur = conn.cursor()
@@ -249,6 +304,45 @@ def update_material_status(mid, status):
     conn.close()
 
 
+def get_material_by_id(mid):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM materials WHERE id = ?", (mid,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def consume_material(mid, amount):
+    if amount <= 0:
+        return False, "用量必须大于0"
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM materials WHERE id = ?", (mid,))
+    mat = cur.fetchone()
+    if not mat:
+        conn.close()
+        return False, "批次不存在"
+    qty = mat["quantity"] or 0
+    if qty < amount:
+        conn.close()
+        return False, f"库存不足 (剩余 {qty}, 需要 {amount})"
+    cur.execute("UPDATE materials SET quantity = quantity - ? WHERE id = ?", (amount, mid))
+    conn.commit()
+    conn.close()
+    return True, "扣减成功"
+
+
+def add_material_flow_with_consume(material_id, batch_no, repair_order_id, order_no,
+                                   customer_id, customer_name, usage_amount):
+    ok, msg = consume_material(material_id, usage_amount)
+    if not ok:
+        return None, msg
+    fid = add_material_flow(material_id, batch_no, repair_order_id, order_no,
+                            customer_id, customer_name, usage_amount)
+    return fid, "登记成功"
+
+
 def add_repair_order(customer_id, customer_name, item_desc="", repair_content=""):
     conn = get_conn()
     cur = conn.cursor()
@@ -341,6 +435,44 @@ def check_expired_materials():
     cur.execute(
         "SELECT * FROM materials WHERE status = ? AND expiry_date != '' AND expiry_date <= ?",
         (MATERIAL_STATUS_ACTIVE, today))
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_flows_combined(customer_name="", order_no="", batch_no="", material_name=""):
+    conn = get_conn()
+    cur = conn.cursor()
+    sql = """
+        SELECT mf.*,
+               m.material_name,
+               m.material_type,
+               m.expiry_date,
+               m.status AS material_status,
+               ro.item_desc,
+               ro.repair_content,
+               c.phone AS customer_phone
+        FROM material_flow mf
+        LEFT JOIN materials m ON mf.material_id = m.id
+        LEFT JOIN repair_orders ro ON mf.repair_order_id = ro.id
+        LEFT JOIN customers c ON mf.customer_id = c.id
+        WHERE 1=1
+    """
+    params = []
+    if customer_name:
+        sql += " AND mf.customer_name LIKE ?"
+        params.append(f"%{customer_name}%")
+    if order_no:
+        sql += " AND mf.order_no LIKE ?"
+        params.append(f"%{order_no}%")
+    if batch_no:
+        sql += " AND mf.batch_no LIKE ?"
+        params.append(f"%{batch_no}%")
+    if material_name:
+        sql += " AND m.material_name LIKE ?"
+        params.append(f"%{material_name}%")
+    sql += " ORDER BY mf.id DESC"
+    cur.execute(sql, params)
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]

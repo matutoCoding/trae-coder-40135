@@ -203,35 +203,76 @@ class FlowRecallModule(QWidget):
 
         search = QFrame()
         search.setStyleSheet(FRAME_STYLE)
-        sl = QHBoxLayout(search)
-        sl.addWidget(QLabel("🔍 输入问题批号反查受影响客户:"))
+        sl = QVBoxLayout(search)
+        sl.setSpacing(8)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        self.recall_name = QLineEdit()
+        self.recall_name.setPlaceholderText("客户姓名 (模糊匹配)")
+        self.recall_name.setFixedHeight(32)
+        self.recall_order = QLineEdit()
+        self.recall_order.setPlaceholderText("工单号 (模糊匹配)")
+        self.recall_order.setFixedHeight(32)
         self.recall_batch = QLineEdit()
-        self.recall_batch.setPlaceholderText("如 RL20250601-01")
-        self.recall_batch.setMinimumHeight(36)
-        self.recall_btn = QPushButton("查询召回名单")
-        self.recall_btn.setStyleSheet(BTN_DANGER)
-        self.recall_btn.setMinimumHeight(36)
-        self.recall_btn.clicked.connect(self.do_recall_search)
-        sl.addWidget(self.recall_batch, 2)
-        sl.addWidget(self.recall_btn)
+        self.recall_batch.setPlaceholderText("材料批号 (模糊匹配)")
+        self.recall_batch.setFixedHeight(32)
+        self.recall_mat = QLineEdit()
+        self.recall_mat.setPlaceholderText("材料名称 (模糊匹配)")
+        self.recall_mat.setFixedHeight(32)
+        row1.addWidget(QLabel("姓名:"))
+        row1.addWidget(self.recall_name, 1)
+        row1.addWidget(QLabel("工单号:"))
+        row1.addWidget(self.recall_order, 1)
+        row1.addWidget(QLabel("批号:"))
+        row1.addWidget(self.recall_batch, 1)
+        row1.addWidget(QLabel("材料名:"))
+        row1.addWidget(self.recall_mat, 1)
+        sl.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        self.recall_search_btn = QPushButton("🔍 查询")
+        self.recall_search_btn.setStyleSheet(BTN_PRIMARY)
+        self.recall_search_btn.setFixedHeight(36)
+        self.recall_search_btn.clicked.connect(self.do_recall_search)
+
+        self.recall_export_btn = QPushButton("📤 导出召回名单(CSV)")
+        self.recall_export_btn.setStyleSheet(BTN_SUCCESS)
+        self.recall_export_btn.setFixedHeight(36)
+        self.recall_export_btn.clicked.connect(self.export_recall_list)
+
+        self.recall_clear_btn = QPushButton("清空条件")
+        self.recall_clear_btn.setFixedHeight(36)
+        self.recall_clear_btn.clicked.connect(self.clear_recall_filters)
+
+        row2.addStretch()
+        row2.addWidget(self.recall_clear_btn)
+        row2.addWidget(self.recall_search_btn)
+        row2.addWidget(self.recall_export_btn)
+        sl.addLayout(row2)
         lv.addWidget(search)
 
-        self.recall_summary = QLabel("请输入批号并查询,将列出所有使用该批次的客户货品。")
-        self.recall_summary.setStyleSheet("padding:10px;background:#fff3e0;color:#e65100;border-radius:6px;font-weight:bold;")
+        self.recall_summary = QLabel("请输入查询条件并查询,将列出符合条件的所有材料流向记录。")
+        self.recall_summary.setStyleSheet(
+            "padding:10px;background:#fff3e0;color:#e65100;border-radius:6px;font-weight:bold;"
+        )
         self.recall_summary.hide()
         lv.addWidget(self.recall_summary)
 
         self.recall_table = QTableWidget()
-        self.recall_table.setColumnCount(7)
-        self.recall_table.setHorizontalHeaderLabels(
-            ["工单号", "客户姓名", "物品描述", "修复内容", "批次用量", "使用时间", "联系信息"]
-        )
+        self.recall_table.setColumnCount(10)
+        headers = ["流水号", "工单号", "客户姓名", "联系电话", "物品描述",
+                   "修复内容", "材料批号", "材料名称", "用量", "使用时间"]
+        self.recall_table.setHorizontalHeaderLabels(headers)
         self.recall_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.recall_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.recall_table.verticalHeader().setVisible(False)
         self.recall_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.recall_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.recall_table.setStyleSheet(TABLE_STYLE)
         lv.addWidget(self.recall_table, 1)
 
+        self._last_recall_results = []
         self.tabs.addTab(w, "⚠ 批次召回查询")
 
     # ---------- 业务逻辑 ----------
@@ -339,7 +380,7 @@ class FlowRecallModule(QWidget):
             QMessageBox.information(self, "提示", "请先在「材料批次」中登记批次")
             return
         amount = self.mat_amt.value()
-        db.add_material_flow(
+        fid, msg = db.add_material_flow_with_consume(
             material_id=data["id"],
             batch_no=data["batch_no"],
             repair_order_id=order["id"],
@@ -348,9 +389,16 @@ class FlowRecallModule(QWidget):
             customer_name=order["customer_name"],
             usage_amount=amount,
         )
+        if fid is None:
+            QMessageBox.warning(self, "登记失败", f"{msg}\n\n请检查库存或换一个批次使用。")
+            return
         self._load_used_materials(order["id"])
         self.refresh_flows()
-        QMessageBox.information(self, "成功", f"已登记使用批次 {data['batch_no']}")
+        self.refresh_materials()
+        QMessageBox.information(self, "成功",
+                                f"已登记使用批次 {data['batch_no']}\n"
+                                f"用量: {amount} ml/g\n"
+                                f"剩余库存: {db.get_material_by_id(data['id'])['quantity']} ml/g")
 
     def _load_used_materials(self, order_id):
         self.used_list.clear()
@@ -412,41 +460,105 @@ class FlowRecallModule(QWidget):
             self.flow_table.setItem(i, 7, item)
 
     def do_recall_search(self):
+        name = self.recall_name.text().strip()
+        order = self.recall_order.text().strip()
         batch = self.recall_batch.text().strip()
-        if not batch:
-            QMessageBox.warning(self, "提示", "请输入批号")
-            return
-        flows = db.get_flow_by_material(batch_no=batch)
-        if not flows:
-            self.recall_summary.setText(f"未找到批号「{batch}」的使用记录。")
-            self.recall_summary.show()
-            self.recall_table.setRowCount(0)
-            return
-        orders = {o["id"]: o for o in db.get_repair_orders()}
-        self.recall_table.setRowCount(len(flows))
-        affected_customers = set()
-        for i, f in enumerate(flows):
-            o = orders.get(f["repair_order_id"], {})
-            self.recall_table.setItem(i, 0, QTableWidgetItem(f["order_no"]))
-            self.recall_table.setItem(i, 1, QTableWidgetItem(f.get("customer_name") or o.get("customer_name") or ""))
-            self.recall_table.setItem(i, 2, QTableWidgetItem(o.get("item_desc") or ""))
-            self.recall_table.setItem(i, 3, QTableWidgetItem(o.get("repair_content") or ""))
-            self.recall_table.setItem(i, 4, QTableWidgetItem(str(f.get("usage_amount") or 0)))
-            self.recall_table.setItem(i, 5, QTableWidgetItem(f.get("used_at") or ""))
-            customers = db.get_customers()
-            contact = ""
-            for c in customers:
-                if c["name"] == (f.get("customer_name") or o.get("customer_name")):
-                    contact = c.get("phone") or ""
-                    break
-            self.recall_table.setItem(i, 6, QTableWidgetItem(contact))
-            if f.get("customer_name"):
-                affected_customers.add(f["customer_name"])
+        mat = self.recall_mat.text().strip()
 
-        self.recall_summary.setText(
-            f"⚠ 批号「{batch}」共影响 {len(flows)} 单 / {len(affected_customers)} 位客户,请尽快通知召回!"
+        if not name and not order and not batch and not mat:
+            ret = QMessageBox.question(self, "提示",
+                                        "未填写任何查询条件,将显示全部流向记录。是否继续?")
+            if ret != QMessageBox.Yes:
+                return
+
+        flows = db.get_flows_combined(
+            customer_name=name,
+            order_no=order,
+            batch_no=batch,
+            material_name=mat,
         )
-        self.recall_summary.show()
+        self._last_recall_results = flows
+
+        self.recall_table.setRowCount(len(flows))
+        customers_set = set()
+        orders_set = set()
+        for i, f in enumerate(flows):
+            self.recall_table.setItem(i, 0, QTableWidgetItem(str(f["id"])))
+            self.recall_table.setItem(i, 1, QTableWidgetItem(f["order_no"]))
+            self.recall_table.setItem(i, 2, QTableWidgetItem(f.get("customer_name") or ""))
+            self.recall_table.setItem(i, 3, QTableWidgetItem(f.get("customer_phone") or ""))
+            self.recall_table.setItem(i, 4, QTableWidgetItem(f.get("item_desc") or ""))
+            self.recall_table.setItem(i, 5, QTableWidgetItem(f.get("repair_content") or ""))
+            self.recall_table.setItem(i, 6, QTableWidgetItem(f["batch_no"]))
+            self.recall_table.setItem(i, 7, QTableWidgetItem(f.get("material_name") or ""))
+            self.recall_table.setItem(i, 8, QTableWidgetItem(str(f.get("usage_amount") or 0)))
+            self.recall_table.setItem(i, 9, QTableWidgetItem(f.get("used_at") or ""))
+
+            if f.get("customer_name"):
+                customers_set.add(f["customer_name"])
+            orders_set.add(f["order_no"])
+
+        if flows:
+            desc_parts = []
+            if batch:
+                desc_parts.append(f"批号「{batch}」")
+            if name:
+                desc_parts.append(f"客户「{name}」")
+            if order:
+                desc_parts.append(f"工单「{order}」")
+            if mat:
+                desc_parts.append(f"材料「{mat}」")
+            desc = "、".join(desc_parts) if desc_parts else "全部"
+            self.recall_summary.setText(
+                f"⚠ {desc} 共 {len(flows)} 条流向 / {len(orders_set)} 单 / {len(customers_set)} 位客户,请尽快通知召回!"
+            )
+            self.recall_summary.show()
+        else:
+            self.recall_summary.setText("未找到符合条件的使用记录。")
+            self.recall_summary.show()
+
+    def export_recall_list(self):
+        if not self._last_recall_results:
+            QMessageBox.information(self, "提示", "请先查询出结果后再导出")
+            return
+        from datetime import datetime
+        default_name = f"召回名单_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "导出召回名单", default_name, "CSV文件 (*.csv)")
+        if not path:
+            return
+        try:
+            import csv
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "流水号", "工单号", "客户姓名", "联系电话", "物品描述",
+                    "修复内容", "材料批号", "材料名称", "用量(ml/g)", "使用时间"
+                ])
+                for r in self._last_recall_results:
+                    writer.writerow([
+                        r.get("id", ""),
+                        r.get("order_no", ""),
+                        r.get("customer_name", ""),
+                        r.get("customer_phone", ""),
+                        r.get("item_desc", ""),
+                        r.get("repair_content", ""),
+                        r.get("batch_no", ""),
+                        r.get("material_name", ""),
+                        r.get("usage_amount", ""),
+                        r.get("used_at", ""),
+                    ])
+            QMessageBox.information(self, "导出成功", f"已导出 {len(self._last_recall_results)} 条记录到:\n{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", str(e))
+
+    def clear_recall_filters(self):
+        self.recall_name.clear()
+        self.recall_order.clear()
+        self.recall_batch.clear()
+        self.recall_mat.clear()
+        self.recall_summary.hide()
+        self.recall_table.setRowCount(0)
+        self._last_recall_results = []
 
 
 FRAME_STYLE = """
@@ -459,6 +571,10 @@ QLineEdit, QComboBox, QDoubleSpinBox {
 BTN_PRIMARY = """
 QPushButton { background:#1976d2; color:white; border:none; border-radius:6px; padding:6px 16px; }
 QPushButton:hover { background:#1565c0; }
+"""
+BTN_SUCCESS = """
+QPushButton { background:#2e7d32; color:white; border:none; border-radius:6px; padding:6px 16px; }
+QPushButton:hover { background:#1b5e20; }
 """
 BTN_DANGER = """
 QPushButton { background:#c62828; color:white; border:none; border-radius:6px; padding:6px 20px; font-weight:bold; }

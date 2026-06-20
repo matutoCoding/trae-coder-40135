@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                                QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView,
                                QMessageBox, QFrame, QDateEdit, QComboBox, QDoubleSpinBox,
-                               QTextEdit)
+                               QTextEdit, QSplitter)
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QFont, QColor
 import db
@@ -103,6 +103,11 @@ class MaterialModule(QWidget):
         self.recall_btn.setFixedHeight(36)
         self.recall_btn.clicked.connect(self.mark_recall)
 
+        self.view_flow_btn = QPushButton("📋 查看流向")
+        self.view_flow_btn.setStyleSheet(BTN_INFO)
+        self.view_flow_btn.setFixedHeight(36)
+        self.view_flow_btn.clicked.connect(self.show_flow_detail)
+
         self.check_expiry_btn = QPushButton("🔍 检查过期")
         self.check_expiry_btn.setStyleSheet(BTN_INFO)
         self.check_expiry_btn.setFixedHeight(36)
@@ -112,10 +117,14 @@ class MaterialModule(QWidget):
         self.refresh_btn.setFixedHeight(36)
         self.refresh_btn.clicked.connect(self.refresh)
 
+        filter_bar.addWidget(self.view_flow_btn)
         filter_bar.addWidget(self.recall_btn)
         filter_bar.addWidget(self.check_expiry_btn)
         filter_bar.addWidget(self.refresh_btn)
         root.addLayout(filter_bar)
+
+        split = QSplitter(Qt.Vertical)
+        root.addWidget(split, 1)
 
         self.table = QTableWidget()
         self.table.setColumnCount(9)
@@ -128,7 +137,31 @@ class MaterialModule(QWidget):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setStyleSheet(TABLE_STYLE)
-        root.addWidget(self.table, 1)
+        self.table.itemSelectionChanged.connect(self.on_material_selected)
+        split.addWidget(self.table)
+
+        detail_frame = QFrame()
+        detail_frame.setStyleSheet("QFrame{background:#fafafa;border:1px solid #e0e0e0;border-radius:6px;}")
+        dl = QVBoxLayout(detail_frame)
+        dl.setContentsMargins(10, 8, 10, 8)
+        dl.setSpacing(6)
+        self.detail_title = QLabel("📦 选中批次的使用流向明细(点击表格查看)")
+        self.detail_title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        self.detail_title.setStyleSheet("color:#37474f;")
+        dl.addWidget(self.detail_title)
+
+        self.flow_table = QTableWidget()
+        self.flow_table.setColumnCount(5)
+        self.flow_table.setHorizontalHeaderLabels(
+            ["工单号", "客户姓名", "用量", "使用时间", "状态"]
+        )
+        self.flow_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.flow_table.verticalHeader().setVisible(False)
+        self.flow_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.flow_table.setStyleSheet(TABLE_STYLE)
+        dl.addWidget(self.flow_table, 1)
+        split.addWidget(detail_frame)
+        split.setSizes([400, 260])
 
         self.expiry_label = QLabel("")
         self.expiry_label.setStyleSheet("background:#ffebee;color:#c62828;padding:10px;border-radius:6px;")
@@ -177,6 +210,47 @@ class MaterialModule(QWidget):
         db.update_material_status(mid, MATERIAL_STATUS_RECALL)
         self.refresh()
 
+    def on_material_selected(self):
+        mid = self._selected_id()
+        if mid is None:
+            self.flow_table.setRowCount(0)
+            return
+        self._load_flow_detail(mid)
+
+    def show_flow_detail(self):
+        mid = self._selected_id()
+        if mid is None:
+            return
+        self._load_flow_detail(mid)
+
+    def _load_flow_detail(self, mid):
+        mat = db.get_material_by_id(mid)
+        if not mat:
+            return
+        flows = db.get_flow_by_material(material_id=mid)
+        self.detail_title.setText(
+            f"📦 {mat['batch_no']} | {mat['material_name']}  "
+            f"剩余: {mat['quantity']} ml/g    共 {len(flows)} 条使用记录"
+        )
+        self.flow_table.setRowCount(len(flows))
+        for i, f in enumerate(flows):
+            self.flow_table.setItem(i, 0, QTableWidgetItem(f["order_no"]))
+            self.flow_table.setItem(i, 1, QTableWidgetItem(f.get("customer_name") or ""))
+            self.flow_table.setItem(i, 2, QTableWidgetItem(str(f.get("usage_amount") or 0)))
+            self.flow_table.setItem(i, 3, QTableWidgetItem(f.get("used_at") or ""))
+            status_text = "正常"
+            color = "#2e7d32"
+            if mat.get("status") == "expired":
+                status_text, color = "已过期", "#c62828"
+            elif mat.get("status") == "recall":
+                status_text, color = "召回中", "#ef6c00"
+            item = QTableWidgetItem(status_text)
+            item.setForeground(QColor(color))
+            ff = item.font()
+            ff.setBold(True)
+            item.setFont(ff)
+            self.flow_table.setItem(i, 4, item)
+
     def check_expiry(self):
         expired = db.check_expired_materials()
         if not expired:
@@ -190,6 +264,14 @@ class MaterialModule(QWidget):
 
     def refresh(self):
         self.expiry_label.hide()
+
+        prev_mid = None
+        row = self.table.currentRow()
+        if row >= 0:
+            it = self.table.item(row, 0)
+            if it:
+                prev_mid = int(it.text())
+
         rows = db.get_materials()
         mode = self.filter_combo.currentIndex()
         keyword = self.search_edit.text().strip().lower()
@@ -210,6 +292,7 @@ class MaterialModule(QWidget):
 
         self.table.setRowCount(len(filtered))
         today = date.today().isoformat()
+        target_row = -1
         for i, r in enumerate(filtered):
             self.table.setItem(i, 0, QTableWidgetItem(str(r["id"])))
             self.table.setItem(i, 1, QTableWidgetItem(r["batch_no"]))
@@ -223,7 +306,15 @@ class MaterialModule(QWidget):
                 exp_item.setFont(QFont("", -1, QFont.Bold))
             self.table.setItem(i, 4, exp_item)
 
-            self.table.setItem(i, 5, QTableWidgetItem(str(r.get("quantity", 0))))
+            qty = r.get("quantity", 0)
+            qty_item = QTableWidgetItem(str(qty))
+            if qty <= 0:
+                qty_item.setForeground(QColor("#b71c1c"))
+                qty_item.setFont(QFont("", -1, QFont.Bold))
+            elif qty < 50:
+                qty_item.setForeground(QColor("#ef6c00"))
+                qty_item.setFont(QFont("", -1, QFont.Bold))
+            self.table.setItem(i, 5, qty_item)
 
             status_text, color = self._status_style(r["status"])
             status_item = QTableWidgetItem(status_text)
@@ -235,6 +326,15 @@ class MaterialModule(QWidget):
 
             self.table.setItem(i, 7, QTableWidgetItem(r.get("remark") or ""))
             self.table.setItem(i, 8, QTableWidgetItem(r.get("created_at") or ""))
+            if prev_mid is not None and r["id"] == prev_mid:
+                target_row = i
+
+        if target_row >= 0:
+            self.table.selectRow(target_row)
+        elif self.table.rowCount() > 0 and row < 0:
+            self.table.selectRow(0)
+        else:
+            self.flow_table.setRowCount(0)
 
     def _status_style(self, s):
         return {
